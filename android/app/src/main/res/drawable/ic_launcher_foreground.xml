@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simplified adaptive treatment of approved icon direction C:
+     two graphite ring halves joined by a single lime bridge. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#34383F"
+        android:pathData="M18,49 C18,25 34,12 54,12 C74,12 90,25 90,49 Q90,54 85,54 L78,54 Q74,54 74,49 C74,35 66,27 54,27 C42,27 34,35 34,49 Q34,54 30,54 L23,54 Q18,54 18,49 Z" />
+    <path
+        android:fillColor="#34383F"
+        android:pathData="M18,59 Q18,54 23,54 L30,54 Q34,54 34,59 C34,73 42,81 54,81 C66,81 74,73 74,59 Q74,54 78,54 L85,54 Q90,54 90,59 C90,83 74,96 54,96 C34,96 18,83 18,59 Z" />
+    <path
+        android:fillColor="#747A84"
+        android:pathData="M22,43 C25,25 38,17 54,17 C70,17 83,25 86,43 C80,28 68,22 54,22 C40,22 28,28 22,43 Z" />
+    <path
+        android:fillColor="#15171B"
+        android:pathData="M22,65 C28,80 40,88 54,88 C68,88 80,80 86,65 C83,83 70,91 54,91 C38,91 25,83 22,65 Z" />
+    <path
+        android:fillColor="#9CFF2E"
+        android:pathData="M27,49 L81,49 Q86,49 86,54 Q86,59 81,59 L27,59 Q22,59 22,54 Q22,49 27,49 Z" />
+    <path
+        android:fillColor="#D4FF75"
+        android:pathData="M29,51 L79,51 Q81,51 81,53 L27,53 Q27,51 29,51 Z" />
+</vector>
