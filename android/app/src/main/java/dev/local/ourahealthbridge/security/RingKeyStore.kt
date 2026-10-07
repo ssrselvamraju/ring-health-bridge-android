@@ -34,6 +34,7 @@ class RingKeyStore(context: Context) {
         preferences.edit()
             .putString(IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString(CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+            .putLong(IMPORTED_AT, System.currentTimeMillis())
             .apply()
         ciphertext.fill(0)
     }
@@ -57,6 +58,8 @@ class RingKeyStore(context: Context) {
         preferences.edit().clear().apply()
         keyStore().deleteEntry(KEY_ALIAS)
     }
+
+    fun importedAtMillis(): Long? = preferences.getLong(IMPORTED_AT, 0L).takeIf { it > 0L }
 
     private fun wrappingKey(): SecretKey {
         val store = keyStore()
@@ -96,5 +99,6 @@ class RingKeyStore(context: Context) {
         const val PREFERENCES = "ring-key-v1"
         const val IV = "iv"
         const val CIPHERTEXT = "ciphertext"
+        const val IMPORTED_AT = "imported-at"
     }
 }

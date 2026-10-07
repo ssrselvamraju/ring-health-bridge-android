@@ -49,38 +49,50 @@ import androidx.compose.ui.unit.dp
 import dev.local.ourahealthbridge.BackgroundScheduleUiSnapshot
 import dev.local.ourahealthbridge.PresenceObservationState
 import dev.local.ourahealthbridge.analysis.LatestLocalMetrics
+import dev.local.ourahealthbridge.analysis.SleepNightDetail
+import dev.local.ourahealthbridge.analysis.SleepTrendPoint
+import dev.local.ourahealthbridge.analysis.sleepSparkline
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunOutcome
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunUiSnapshot
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-enum class PrimeDestination { HOME, SETTINGS, ADVANCED_LEGACY }
+enum class PrimeDestination { HOME, SETUP, SETTINGS, ADVANCED_LEGACY }
 internal fun backDestination(destination: PrimeDestination): PrimeDestination? = when (destination) {
     PrimeDestination.ADVANCED_LEGACY -> PrimeDestination.SETTINGS
     PrimeDestination.SETTINGS -> PrimeDestination.HOME
+    PrimeDestination.SETUP -> PrimeDestination.HOME
     PrimeDestination.HOME -> null
 }
 enum class HealthConnectState { READY, PERMISSIONS_NEEDED, UNAVAILABLE }
 enum class HeartRateFreshness { RECENT, STALE, UNAVAILABLE }
+enum class GuidedSetupStage { CREDENTIAL, ASSOCIATION, AUTHENTICATION, HEALTH_CONNECT, FIRST_SYNC, COMPLETE }
 
 data class PrimeUiState(
     val ringDisplayName: String = "Oura Ring",
     val keyPresent: Boolean = false,
+    val authenticationVerified: Boolean = false,
+    val firstSyncVerified: Boolean = false,
+    val setupStatus: String = "Setup checks have not started",
     val associated: Boolean = false,
     val bonded: Boolean = false,
     val healthConnect: HealthConnectState = HealthConnectState.UNAVAILABLE,
     val run: ForegroundRunUiSnapshot? = null,
     val schedule: BackgroundScheduleUiSnapshot? = null,
     val metrics: LatestLocalMetrics = LatestLocalMetrics(null, null, null, null, null, null),
+    val sleepDetail: SleepNightDetail? = null,
     val nowUnixMillis: Long = System.currentTimeMillis(),
 )
 
 sealed interface PrimeUiEvent {
     data object SyncNow : PrimeUiEvent
     data object AssociateRing : PrimeUiEvent
+    data object SelectCredentialFile : PrimeUiEvent
+    data object TestAuthentication : PrimeUiEvent
     data class SetBackgroundSync(val enabled: Boolean) : PrimeUiEvent
     data class SetRingDisplayName(val name: String) : PrimeUiEvent
 }
@@ -90,6 +102,15 @@ data class HeartRatePresentation(
     val bpm: Int?,
     val measuredUnixMillis: Long?,
 )
+
+internal fun guidedSetupStage(state: PrimeUiState): GuidedSetupStage = when {
+    !state.keyPresent -> GuidedSetupStage.CREDENTIAL
+    !state.associated || !state.bonded -> GuidedSetupStage.ASSOCIATION
+    !state.authenticationVerified -> GuidedSetupStage.AUTHENTICATION
+    state.healthConnect != HealthConnectState.READY -> GuidedSetupStage.HEALTH_CONNECT
+    !state.firstSyncVerified -> GuidedSetupStage.FIRST_SYNC
+    else -> GuidedSetupStage.COMPLETE
+}
 
 fun heartRatePresentation(
     metrics: LatestLocalMetrics,
@@ -115,7 +136,10 @@ fun PrimeBridgeApp(
     onEvent: (PrimeUiEvent) -> Unit,
     legacyContent: @Composable () -> Unit,
 ) {
-    var destinationName by rememberSaveable { mutableStateOf(PrimeDestination.HOME.name) }
+    val needsCoreSetup = !state.keyPresent || !state.associated || !state.bonded || !state.authenticationVerified
+    var destinationName by rememberSaveable {
+        mutableStateOf(if (needsCoreSetup) PrimeDestination.SETUP.name else PrimeDestination.HOME.name)
+    }
     var displayNow by remember(state.nowUnixMillis) { mutableLongStateOf(state.nowUnixMillis) }
     LaunchedEffect(state.nowUnixMillis) {
         while (true) {
@@ -136,16 +160,160 @@ fun PrimeBridgeApp(
                 onSync = { onEvent(PrimeUiEvent.SyncNow) },
                 onSettings = { destinationName = PrimeDestination.SETTINGS.name },
             )
+            PrimeDestination.SETUP -> SetupScreen(
+                state = displayState,
+                onBack = { destinationName = PrimeDestination.HOME.name },
+                onComplete = { destinationName = PrimeDestination.HOME.name },
+                onEvent = onEvent,
+            )
             PrimeDestination.SETTINGS -> SettingsScreen(
                 state = displayState,
                 onBack = { destinationName = PrimeDestination.HOME.name },
                 onAdvanced = { destinationName = PrimeDestination.ADVANCED_LEGACY.name },
+                onSetup = { destinationName = PrimeDestination.SETUP.name },
                 onEvent = onEvent,
             )
             PrimeDestination.ADVANCED_LEGACY -> AdvancedLegacyScreen(
                 onBack = { destinationName = PrimeDestination.SETTINGS.name },
                 legacyContent = legacyContent,
             )
+        }
+    }
+}
+
+@Composable
+private fun SetupScreen(
+    state: PrimeUiState,
+    onBack: () -> Unit,
+    onComplete: () -> Unit,
+    onEvent: (PrimeUiEvent) -> Unit,
+) {
+    var resetWarningAcknowledged by remember { mutableStateOf(false) }
+    val firstSyncVerified = state.firstSyncVerified
+    val setupComplete = guidedSetupStage(state) == GuidedSetupStage.COMPLETE
+    Scaffold(containerColor = Color.Black) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            TextButton(onClick = onBack) { Text("← Home") }
+            Text("Set up Ring Health Bridge", style = MaterialTheme.typography.headlineLarge)
+            Text(
+                "Experimental, independent software; not affiliated with Oura. Physically validated only with " +
+                    "a Gen 3 Horizon on Android 14 or newer.",
+                color = TextSecondary,
+            )
+            SettingsCard(
+                "What this release publishes",
+                "Heart rate, RMSSD HRV, completed sleep sessions",
+                "Raw ring history and credentials remain local. The app has no Internet or telemetry permission. " +
+                    "Steps, stages, SpO₂, temperature deltas, and scores are not production publications.",
+            )
+            Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF2B1C12))) {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Before resetting a ring", color = Amber, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "A factory reset erases unsynchronized ring data and breaks the official app’s authentication " +
+                            "relationship. Returning to the official app can require another reset and further data loss. " +
+                            "This app never resets the ring automatically.",
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Switch(
+                            checked = resetWarningAcknowledged,
+                            onCheckedChange = { resetWarningAcknowledged = it },
+                        )
+                        Text("I have read this warning. This is not permission to reset later.")
+                    }
+                }
+            }
+            SetupStepCard(
+                number = 1,
+                title = "Desktop-assisted credential",
+                status = when {
+                    state.authenticationVerified -> "Stored and verified"
+                    state.keyPresent -> "Stored; verification pending"
+                    else -> "Required"
+                },
+                detail = if (state.authenticationVerified) {
+                    "The existing credential is protected against replacement."
+                } else if (state.keyPresent) {
+                    "The stored credential has not authenticated successfully. You may select a corrected private file."
+                } else {
+                    "Android-only Gen 3 provisioning is not validated. Use the project’s local desktop helper, then " +
+                        "select its private 32-hex-character credential file here."
+                },
+            ) {
+                Button(
+                    onClick = { onEvent(PrimeUiEvent.SelectCredentialFile) },
+                    enabled = resetWarningAcknowledged && !state.authenticationVerified,
+                ) { Text(if (state.keyPresent) "Reselect private credential file" else "Select private credential file") }
+            }
+            SetupStepCard(
+                number = 2,
+                title = "Bluetooth association and bond",
+                status = when {
+                    state.associated && state.bonded -> "Verified"
+                    state.associated -> "Bond needs attention"
+                    else -> "Not associated"
+                },
+                detail = "Android shows a system-owned nearby-device chooser and pairing confirmation. " +
+                    "Confirm that the selected device is your ring.",
+            ) {
+                Button(
+                    onClick = { onEvent(PrimeUiEvent.AssociateRing) },
+                    enabled = state.keyPresent && !(state.associated && state.bonded),
+                ) { Text(if (state.associated) "Finish Bluetooth bond" else "Find and associate ring") }
+            }
+            SetupStepCard(
+                number = 3,
+                title = "Ring authentication",
+                status = if (state.authenticationVerified) "Verified" else "Not verified",
+                detail = "Discovery and pairing are not authentication. The app must prove the stored credential works.",
+            ) {
+                Button(
+                    onClick = { onEvent(PrimeUiEvent.TestAuthentication) },
+                    enabled = state.keyPresent && state.bonded && !state.authenticationVerified,
+                ) { Text("Verify ring authentication") }
+            }
+            SetupStepCard(
+                number = 4,
+                title = "Health Connect and first sync",
+                status = when {
+                    firstSyncVerified && state.healthConnect == HealthConnectState.READY -> "Verified"
+                    state.healthConnect == HealthConnectState.READY -> "Permission ready; first sync pending"
+                    state.healthConnect == HealthConnectState.UNAVAILABLE -> "Unavailable"
+                    else -> "Permission required"
+                },
+                detail = "Only production publication access is needed here. Background sync remains off until you opt in.",
+            ) {
+                Button(
+                    onClick = { onEvent(PrimeUiEvent.SyncNow) },
+                    enabled = state.authenticationVerified && state.healthConnect != HealthConnectState.UNAVAILABLE &&
+                        state.run?.outcome != ForegroundRunOutcome.RUNNING,
+                ) { Text(if (state.healthConnect == HealthConnectState.READY) "Run verified first sync" else "Grant access and sync") }
+            }
+            Text(state.setupStatus, color = TextSecondary)
+            Button(onClick = onComplete, enabled = setupComplete, modifier = Modifier.fillMaxWidth()) {
+                Text(if (setupComplete) "Setup complete — open bridge" else "Complete the verified steps above")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SetupStepCard(
+    number: Int,
+    title: String,
+    status: String,
+    detail: String,
+    action: @Composable () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("$number · $title", style = MaterialTheme.typography.titleMedium)
+            Text(status, color = Lime, fontWeight = FontWeight.SemiBold)
+            Text(detail, color = TextSecondary)
+            action()
         }
     }
 }
@@ -186,7 +354,7 @@ private fun HomeScreen(
         ) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
-                    Text("OURA HEALTH BRIDGE", color = Lime, style = MaterialTheme.typography.labelLarge)
+                    Text("RING HEALTH BRIDGE", color = Lime, style = MaterialTheme.typography.labelLarge)
                     Text("Direct. Private. Local.", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
                 }
                 TextButton(onClick = onSettings) { Text("Settings") }
@@ -237,6 +405,7 @@ private fun HomeScreen(
             }
 
             HeartRateCard(state)
+            SleepDetailCard(state.sleepDetail)
 
             val running = state.run?.outcome == ForegroundRunOutcome.RUNNING
             Button(
@@ -306,6 +475,98 @@ private fun HeartRateCard(state: PrimeUiState) {
 }
 
 @Composable
+private fun SleepDetailCard(detail: SleepNightDetail?) {
+    Card(colors = CardDefaults.cardColors(containerColor = SurfaceRaised)) {
+        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("SLEEP DETAIL · RESEARCH PREVIEW", color = TextSecondary, style = MaterialTheme.typography.labelLarge)
+            if (detail == null) {
+                Text("Not generated", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("Sync after an overnight recording or build Sleep Detail v0 in Advanced.", color = TextSecondary)
+                return@Column
+            }
+            Text(
+                "${formatClock(detail.startUnixMillis)} – ${formatClock(detail.endUnixMillis)}",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Sleep window ${detail.durationMinutes / 60}h ${detail.durationMinutes % 60}m · " +
+                    formatSleepDate(detail.endUnixMillis),
+                color = TextSecondary,
+            )
+            SleepSignalRow("Heart rate", detail.heartRate, "bpm", detail.durationMinutes)
+            SleepSignalRow("HRV (RMSSD)", detail.hrv, "ms", detail.durationMinutes)
+            Text("Temperature and movement are unvalidated research signals, not clinical measurements.", color = Amber)
+            SleepSignalRow("Finger-sensor temperature", detail.fingerTemperature, "°C", detail.durationMinutes)
+            if (detail.movementSignal.isNotEmpty()) {
+                Text("Relative movement", fontWeight = FontWeight.SemiBold)
+                Text(sleepSparkline(detail.movementSignal), color = Teal, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${detail.movementSignal.size} five-minute bins; relative signal only",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                Text("Relative movement · unavailable", color = TextSecondary)
+            }
+            Text(
+                if (detail.stageEpochs > 0) {
+                    "Stage-like packets detected (${detail.stageEpochs} epochs); labels are not yet validated"
+                } else {
+                    "Sleep stages · not available from validated local decoding"
+                },
+                color = Amber,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                if (detail.spo2Samples > 0) {
+                    "Finished SpO₂ packets detected (${detail.spo2Samples} samples); values are not yet validated"
+                } else {
+                    "Blood oxygen · not available from validated local decoding"
+                },
+                color = Amber,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                "The ring-reported window is not yet proven total sleep. No sleep score is calculated.",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SleepSignalRow(
+    label: String,
+    points: List<SleepTrendPoint>,
+    unit: String,
+    durationMinutes: Long,
+) {
+    if (points.isEmpty()) {
+        Text("$label · unavailable", color = TextSecondary)
+        return
+    }
+    val values = points.map(SleepTrendPoint::value).sorted()
+    val median = if (values.size % 2 == 0) {
+        (values[values.size / 2 - 1] + values[values.size / 2]) / 2.0
+    } else {
+        values[values.size / 2]
+    }
+    Text("$label · ${"%.1f".format(Locale.US, median)} $unit median", fontWeight = FontWeight.SemiBold)
+    Text(sleepSparkline(points), color = Lime, style = MaterialTheme.typography.titleMedium)
+    val expectedFiveMinuteBins = ((durationMinutes + 4) / 5).coerceAtLeast(1)
+    val occupiedBins = points.map { Math.floorDiv(it.unixMillis, 300_000L) }.distinct().size
+    val coverage = (occupiedBins * 100L / expectedFiveMinuteBins).coerceIn(0, 100)
+    Text(
+        "${"%.1f".format(Locale.US, values.first())}–${"%.1f".format(Locale.US, values.last())} $unit · " +
+            "${points.size} samples/bins · ~$coverage% five-minute coverage",
+        color = TextSecondary,
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
 private fun SyncResultCard(run: ForegroundRunUiSnapshot?) {
     val outcome = run?.outcome ?: ForegroundRunOutcome.NEVER
     val (title, detail, accent) = when (outcome) {
@@ -370,6 +631,7 @@ private fun SettingsScreen(
     state: PrimeUiState,
     onBack: () -> Unit,
     onAdvanced: () -> Unit,
+    onSetup: () -> Unit,
     onEvent: (PrimeUiEvent) -> Unit,
 ) {
     var editingName by remember { mutableStateOf(false) }
@@ -381,6 +643,14 @@ private fun SettingsScreen(
         ) {
             TextButton(onClick = onBack) { Text("← Home") }
             Text("Settings", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
+
+            Card(colors = CardDefaults.cardColors(containerColor = SurfaceRaised)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Guided setup", style = MaterialTheme.typography.titleMedium)
+                    Text("Review verified setup state or resume an incomplete configuration", color = TextSecondary)
+                    OutlinedButton(onClick = onSetup) { Text("Open guided setup") }
+                }
+            }
 
             SettingsCard("Ring", state.ringDisplayName, ringStatusText(state)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -511,6 +781,14 @@ private fun relativeTime(time: Long?, now: Long = System.currentTimeMillis()): S
 private fun formatTime(time: Long): String = Instant.ofEpochMilli(time)
     .atZone(ZoneId.systemDefault())
     .format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))
+
+private fun formatClock(time: Long): String = Instant.ofEpochMilli(time)
+    .atZone(ZoneId.systemDefault())
+    .format(DateTimeFormatter.ofPattern("h:mm a"))
+
+private fun formatSleepDate(time: Long): String = Instant.ofEpochMilli(time)
+    .atZone(ZoneId.systemDefault())
+    .format(DateTimeFormatter.ofPattern("MMM d"))
 
 private const val HEART_RATE_RECENT_MILLIS = 30L * 60L * 1_000L
 private val Lime = Color(0xFFB8F34A)

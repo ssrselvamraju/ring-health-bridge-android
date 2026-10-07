@@ -94,6 +94,8 @@ object HistoryDryRunPreviewBuilder {
                 }
                 is DecodedRingEvent.MotionPeriod -> motionPeriodEvents++
                 is DecodedRingEvent.SleepAccelerometer -> sleepAccelerometerEvents++
+                is DecodedRingEvent.SleepPhases -> Unit
+                is DecodedRingEvent.Spo2 -> Unit
                 is DecodedRingEvent.BedtimePeriod -> if (
                     mapper.unixMillis(decoded.startDeciseconds) != null &&
                     mapper.unixMillis(decoded.endDeciseconds) != null &&

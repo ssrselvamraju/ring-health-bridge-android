@@ -129,7 +129,7 @@ class StepTrialStore(context: Context) {
         if (!preferences.contains(MARKED_FINISHED)) return null
         val finished = preferences.getLong(MARKED_FINISHED, 0L)
         val manual = preferences.getInt(MARKED_MANUAL_STEPS, 0)
-        if (finished <= 0L || manual <= 0) return null
+        if (finished <= 0L || manual < 0) return null
         return MarkedStepTrialEnd(finished, manual)
     }
 
@@ -158,7 +158,7 @@ class StepTrialStore(context: Context) {
         val started = preferences.getLong(LAST_STARTED, 0L)
         val finished = preferences.getLong(LAST_FINISHED, 0L)
         val manual = preferences.getInt(LAST_MANUAL_STEPS, 0)
-        if (started <= 0L || finished <= started || manual <= 0) return null
+        if (started <= 0L || finished <= started || manual < 0) return null
         return CompletedStepTrial(started, finished, manual)
     }
 

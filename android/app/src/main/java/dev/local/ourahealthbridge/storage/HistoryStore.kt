@@ -99,6 +99,67 @@ class HistoryStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         return HistoryStoreStats(count, cursor())
     }
 
+    fun latestRawEventId(): Long = readableDatabase.rawQuery(
+        "SELECT COALESCE(MAX(id), 0) FROM raw_event",
+        null,
+    ).use { cursor ->
+        cursor.moveToFirst()
+        cursor.getLong(0)
+    }
+
+    /**
+     * Loads the bounded event set needed for ordinary post-sync reconciliation.
+     * Explicit full-history diagnostics continue to use [loadRawEvents].
+     */
+    fun loadRawEventsForReconciliation(
+        tags: Set<Int>,
+        initialRawEventId: Long,
+        recentLookbackDeciseconds: Long,
+        newEventMarginDeciseconds: Long,
+    ): List<RawRingEvent> {
+        require(tags.isNotEmpty())
+        require(recentLookbackDeciseconds >= 0L && newEventMarginDeciseconds >= 0L)
+        val orderedTags = tags.filter { it != TIME_ANCHOR_TAG }.sorted()
+        require(orderedTags.isNotEmpty())
+        val placeholders = orderedTags.joinToString(",") { "?" }
+        val tagArguments = orderedTags.map(Int::toString).toTypedArray()
+        val latestRingTimestamp = readableDatabase.rawQuery(
+            "SELECT ring_timestamp FROM raw_event WHERE tag IN ($placeholders) " +
+                "ORDER BY ring_timestamp DESC LIMIT 1",
+            tagArguments,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null }
+            ?: return loadRawEventsForTags(setOf(TIME_ANCHOR_TAG))
+        val earliestNewTimestamp = readableDatabase.rawQuery(
+            "SELECT MIN(ring_timestamp) FROM raw_event WHERE id > ? AND tag IN ($placeholders)",
+            arrayOf(initialRawEventId.toString(), *tagArguments),
+        ).use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+        }
+        val lowerBound = ReconciliationWindow.lowerBound(
+            latestRingTimestamp,
+            earliestNewTimestamp,
+            recentLookbackDeciseconds,
+            newEventMarginDeciseconds,
+        )
+        return readableDatabase.rawQuery(
+            "SELECT tag, ring_timestamp, body FROM raw_event WHERE tag = ? OR " +
+                "(ring_timestamp >= ? AND tag IN ($placeholders)) ORDER BY ring_timestamp, id",
+            arrayOf(TIME_ANCHOR_TAG.toString(), lowerBound.toString(), *tagArguments),
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) {
+                    add(
+                        RawRingEvent(
+                            tag = cursor.getInt(0),
+                            ringTimestampDeciseconds = cursor.getLong(1).toUInt(),
+                            body = cursor.getBlob(2),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     /** Loads raw events for in-process re-decoding; callers must not log or export bodies. */
     fun loadRawEvents(): List<RawRingEvent> = readableDatabase.rawQuery(
         "SELECT tag, ring_timestamp, body FROM raw_event ORDER BY ring_timestamp, id",
@@ -157,7 +218,23 @@ class HistoryStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
     }
 
     private companion object {
+        const val TIME_ANCHOR_TAG = 0x42
         const val DATABASE_NAME = "ring-history-v1.db"
         const val SCHEMA_VERSION = 1
+    }
+}
+
+internal object ReconciliationWindow {
+    fun lowerBound(
+        latestRingTimestamp: Long,
+        earliestNewTimestamp: Long?,
+        recentLookbackDeciseconds: Long,
+        newEventMarginDeciseconds: Long,
+    ): Long {
+        val recent = (latestRingTimestamp - recentLookbackDeciseconds).coerceAtLeast(0L)
+        val aroundNew = earliestNewTimestamp
+            ?.let { (it - newEventMarginDeciseconds).coerceAtLeast(0L) }
+            ?: recent
+        return minOf(recent, aroundNew)
     }
 }
