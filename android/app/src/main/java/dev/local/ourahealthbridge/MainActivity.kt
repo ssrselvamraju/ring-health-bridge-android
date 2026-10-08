@@ -20,6 +20,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.ParcelUuid
 import android.os.PersistableBundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -75,6 +76,7 @@ import dev.local.ourahealthbridge.healthconnect.DailyPublicationStateStore
 import dev.local.ourahealthbridge.healthconnect.ForegroundPublicationPlanner
 import dev.local.ourahealthbridge.healthconnect.ForegroundPublicationPlan
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunReport
+import dev.local.ourahealthbridge.healthconnect.ForegroundRunOutcome
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunStateStore
 import dev.local.ourahealthbridge.healthconnect.OneHourTestPublisher
 import dev.local.ourahealthbridge.healthconnect.OneHourTestReadBackVerifier
@@ -86,6 +88,9 @@ import dev.local.ourahealthbridge.healthconnect.StepTrialSummarizer
 import dev.local.ourahealthbridge.healthconnect.MarkedStepTrialEnd
 import dev.local.ourahealthbridge.security.KeyImportBridge
 import dev.local.ourahealthbridge.security.KeyImportState
+import dev.local.ourahealthbridge.security.CredentialFileParser
+import dev.local.ourahealthbridge.security.RingAuthenticationStateStore
+import dev.local.ourahealthbridge.security.mayImportCredential
 import dev.local.ourahealthbridge.security.RingKeyStore
 import dev.local.ourahealthbridge.storage.HistoryStore
 import java.util.regex.Pattern
@@ -99,6 +104,8 @@ import dev.local.ourahealthbridge.analysis.HealthConnectCandidateSet
 import dev.local.ourahealthbridge.analysis.LatestLocalMetricsStore
 import dev.local.ourahealthbridge.analysis.PrivateStepResearchAudit
 import dev.local.ourahealthbridge.analysis.RingStepInventoryBuilder
+import dev.local.ourahealthbridge.analysis.SleepNightDetailBuilder
+import dev.local.ourahealthbridge.analysis.SleepNightDetailStore
 import dev.local.ourahealthbridge.analysis.StepResearchWindow
 import dev.local.ourahealthbridge.analysis.StepTimeWindowAudit
 import dev.local.ourahealthbridge.ui.HealthConnectState
@@ -118,6 +125,8 @@ class MainActivity : ComponentActivity() {
     internal var previewStatus by mutableStateOf("Not generated")
     internal var recordPreviewStatus by mutableStateOf("Not generated")
     internal var candidatePreviewStatus by mutableStateOf("Not generated")
+    internal var sleepDetailStatus by mutableStateOf("Not generated")
+    internal var sleepInventoryStatus by mutableStateOf("Not generated")
     internal var historicalAuditStatus by mutableStateOf("Not run")
     internal var samsungAuditStatus by mutableStateOf("Not run")
     internal var stepResearchStatus by mutableStateOf("Not run")
@@ -133,6 +142,9 @@ class MainActivity : ComponentActivity() {
     internal var foregroundSyncStatus by mutableStateOf("Not run")
     internal var foregroundRunHistory by mutableStateOf("No foreground sync/publish result yet")
     internal var backgroundScheduleStatus by mutableStateOf("Periodic background sync disabled")
+    internal var diagnosticExportStatus by mutableStateOf("No diagnostic report exported")
+    internal var setupStatus by mutableStateOf("Setup checks have not started")
+    internal var pendingDiagnosticExportText = ""
     internal var pendingHistoricalSource = HistoricalDataSource.OURA
     internal var pendingStepReadAction = StepReadAction.PRIVATE_AUDIT
     internal var pendingManualStepCount: Int? = null
@@ -230,10 +242,86 @@ class MainActivity : ComponentActivity() {
         requestForegroundSyncPublish()
     }
 
+    internal val diagnosticDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri == null) {
+            diagnosticExportStatus = "Diagnostic export canceled; nothing written."
+            return@registerForActivityResult
+        }
+        val text = pendingDiagnosticExportText
+        lifecycleScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { writer ->
+                        writer.write(text)
+                    } ?: error("Could not open selected document")
+                }
+            }
+            diagnosticExportStatus = if (result.isSuccess) {
+                "Sanitized diagnostic report saved to the selected location."
+            } else {
+                "Could not save diagnostic report (${result.exceptionOrNull()?.javaClass?.simpleName})."
+            }
+            pendingDiagnosticExportText = ""
+        }
+    }
+
+    internal val credentialDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (uri == null) {
+            setupStatus = "Credential selection canceled; nothing changed."
+            return@registerForActivityResult
+        }
+        if (!mayImportCredential(isStoredCredentialVerified())) {
+            setupStatus = "An existing credential is protected. Replacement requires a separately verified flow."
+            return@registerForActivityResult
+        }
+        setupStatus = "Validating the selected credential file locally..."
+        lifecycleScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val source = contentResolver.openInputStream(uri)?.use { input ->
+                        val buffer = ByteArray(CredentialFileParser.MAX_FILE_BYTES + 1)
+                        try {
+                            var total = 0
+                            while (total < buffer.size) {
+                                val read = input.read(buffer, total, buffer.size - total)
+                                if (read < 0) break
+                                check(read > 0) { "Credential provider returned no data" }
+                                total += read
+                            }
+                            buffer.copyOf(total)
+                        } finally {
+                            buffer.fill(0)
+                        }
+                    } ?: error("Could not open selected file")
+                    var key = byteArrayOf()
+                    try {
+                        key = CredentialFileParser.parse(source)
+                        RingKeyStore(this@MainActivity).import(key)
+                        RingAuthenticationStateStore(this@MainActivity).clear()
+                    } finally {
+                        source.fill(0)
+                        key.fill(0)
+                    }
+                }
+            }
+            setupStatus = if (result.isSuccess) {
+                "Credential stored with Android Keystore protection. Associate the ring, then verify authentication. " +
+                    "Delete the source credential file securely when you no longer need it."
+            } else {
+                "Credential import rejected (${result.exceptionOrNull()?.javaClass?.simpleName}); nothing was stored."
+            }
+            refreshPrimeUiState()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val importState = KeyImportBridge.importStagedKey(this)
-        val keyPresent = RingKeyStore(this).hasKey()
         val healthConnectStatus = HealthConnectClient.getSdkStatus(this)
         ForegroundRunStateStore(this).also {
             foregroundSyncStatus = it.currentStatusText()
@@ -254,7 +342,7 @@ class MainActivity : ComponentActivity() {
                 onEvent = ::handlePrimeUiEvent,
                 legacyContent = {
                     FoundationScreen(
-                    keyPresent = keyPresent,
+                    keyPresent = primeUiState.keyPresent,
                     importState = importState,
                     associationStatus = associationStatus,
                     connectionStatus = connectionStatus,
@@ -262,6 +350,8 @@ class MainActivity : ComponentActivity() {
                     previewStatus = previewStatus,
                     recordPreviewStatus = recordPreviewStatus,
                     candidatePreviewStatus = candidatePreviewStatus,
+                    sleepDetailStatus = sleepDetailStatus,
+                    sleepInventoryStatus = sleepInventoryStatus,
                     historicalAuditStatus = historicalAuditStatus,
                     samsungAuditStatus = samsungAuditStatus,
                     stepResearchStatus = stepResearchStatus,
@@ -277,6 +367,7 @@ class MainActivity : ComponentActivity() {
                     foregroundSyncStatus = foregroundSyncStatus,
                     foregroundRunHistory = foregroundRunHistory,
                     backgroundScheduleStatus = backgroundScheduleStatus,
+                    diagnosticExportStatus = diagnosticExportStatus,
                     healthConnectStatus = healthConnectStatus,
                     onAssociate = ::requestAssociation,
                     onTestConnection = ::testRingConnection,
@@ -284,6 +375,7 @@ class MainActivity : ComponentActivity() {
                     onBuildPreview = ::buildDryRunPreview,
                     onBuildRecordPreview = ::buildRecordDryRunPreview,
                     onBuildCandidatePreview = ::buildHealthConnectCandidatePreview,
+                    onBuildSleepDetail = ::buildSleepDetailPreview,
                     onAuditHistoricalOura = { requestHistoricalAudit(HistoricalDataSource.OURA) },
                     onAuditHistoricalSamsung = { requestHistoricalAudit(HistoricalDataSource.SAMSUNG_HEALTH) },
                     onRunStepResearchAudit = ::requestPrivateStepResearchAudit,
@@ -312,29 +404,10 @@ class MainActivity : ComponentActivity() {
                     onDisableBackgroundSync = ::disableBackgroundSync,
                     onCopy = ::copyDiagnostics,
                     onCopyAll = {
-                        copyDiagnostics(
-                            listOf(
-                                "Aggregate preview: $previewStatus",
-                                "Record preview: $recordPreviewStatus",
-                                "Candidate preview: $candidatePreviewStatus",
-                                "Historical Oura audit: $historicalAuditStatus",
-                                "Historical Samsung Health audit: $samsungAuditStatus",
-                                "Private step-source audit: $stepResearchStatus",
-                                "Private step time-window audit: $stepTimeWindowStatus",
-                                "REAL_STEPS status: $realStepsStatus",
-                                "REAL_STEPS experiment: $realStepsExperimentState",
-                                "Controlled step trial: $stepTrialStatus",
-                                "One-hour Health Connect test: $oneHourTestStatus",
-                                "One-hour read-back verification: $oneHourVerificationStatus",
-                                "Selected publication date: $dailyDateStatus",
-                                "Date preview: $dailyPreviewStatus",
-                                "Date publication: $dailyPublicationStatus",
-                                "Foreground sync/publish: $foregroundSyncStatus",
-                                "Foreground run history: $foregroundRunHistory",
-                                "Background schedule: $backgroundScheduleStatus",
-                            ).joinToString("\n\n"),
-                        )
+                        copyDiagnostics(diagnosticReport())
                     },
+                    onShareAll = { shareDiagnostics(diagnosticReport()) },
+                    onSaveAll = { saveDiagnostics(diagnosticReport()) },
                     )
                 },
             )
@@ -374,6 +447,8 @@ private fun FoundationScreen(
     previewStatus: String,
     recordPreviewStatus: String,
     candidatePreviewStatus: String,
+    sleepDetailStatus: String,
+    sleepInventoryStatus: String,
     historicalAuditStatus: String,
     samsungAuditStatus: String,
     stepResearchStatus: String,
@@ -389,6 +464,7 @@ private fun FoundationScreen(
     foregroundSyncStatus: String,
     foregroundRunHistory: String,
     backgroundScheduleStatus: String,
+    diagnosticExportStatus: String,
     healthConnectStatus: Int,
     onAssociate: () -> Unit,
     onTestConnection: () -> Unit,
@@ -396,6 +472,7 @@ private fun FoundationScreen(
     onBuildPreview: () -> Unit,
     onBuildRecordPreview: () -> Unit,
     onBuildCandidatePreview: () -> Unit,
+    onBuildSleepDetail: () -> Unit,
     onAuditHistoricalOura: () -> Unit,
     onAuditHistoricalSamsung: () -> Unit,
     onRunStepResearchAudit: () -> Unit,
@@ -424,6 +501,8 @@ private fun FoundationScreen(
     onDisableBackgroundSync: () -> Unit,
     onCopy: (String) -> Unit,
     onCopyAll: () -> Unit,
+    onShareAll: () -> Unit,
+    onSaveAll: () -> Unit,
 ) {
     var confirmOneHourDelete by rememberSaveable { mutableStateOf(false) }
     var confirmDateDelete by rememberSaveable { mutableStateOf(false) }
@@ -442,6 +521,15 @@ private fun FoundationScreen(
             Button(onClick = onCopyAll, modifier = Modifier.fillMaxWidth()) {
                 Text("Copy diagnostic report")
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onShareAll, modifier = Modifier.weight(1f)) {
+                    Text("Share report")
+                }
+                Button(onClick = onSaveAll, modifier = Modifier.weight(1f)) {
+                    Text("Save report")
+                }
+            }
+            Text(diagnosticExportStatus, style = MaterialTheme.typography.bodySmall)
 
             Text("Latest result", style = MaterialTheme.typography.titleLarge)
             DiagnosticOutput("Foreground sync/publish", foregroundSyncStatus, onCopy)
@@ -472,6 +560,9 @@ private fun FoundationScreen(
             }
 
             AdvancedGroup("Data pipeline", "Private decoding and candidate diagnostics") {
+                AdvancedAction("Build latest Sleep Detail v0", onBuildSleepDetail)
+                DiagnosticOutput("Sleep Detail v0", sleepDetailStatus, onCopy, allowCopy = false)
+                DiagnosticOutput("Private sleep structural inventory", sleepInventoryStatus, onCopy, allowCopy = false)
                 AdvancedAction("Build aggregate dry-run preview", onBuildPreview)
                 DiagnosticOutput("Aggregate preview", previewStatus, onCopy)
                 AdvancedAction("Build record-level dry run", onBuildRecordPreview)
@@ -538,7 +629,7 @@ private fun FoundationScreen(
                     onValueChange = { value -> manualStepCount = value.filter(Char::isDigit).take(6) },
                     label = { Text("Manually counted steps") },
                     supportingText = {
-                        Text("Enter the count, then mark the end immediately after your last step.")
+                        Text("Enter the count (0 for the seated control), then mark the end immediately.")
                     },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
@@ -706,13 +797,14 @@ private fun healthConnectLabel(status: Int): String = "Health Connect: " + when 
 }
 
 @Composable
-private fun DiagnosticOutput(label: String, value: String, onCopy: (String) -> Unit) {
+private fun DiagnosticOutput(label: String, value: String, onCopy: (String) -> Unit, allowCopy: Boolean = true) {
     var expanded by rememberSaveable(label) { mutableStateOf(false) }
     val visualState = diagnosticVisualState(value)
     val indicatorColor by animateColorAsState(
         targetValue = when (visualState) {
             DiagnosticVisualState.IDLE -> MaterialTheme.colorScheme.surfaceVariant
             DiagnosticVisualState.RUNNING -> MaterialTheme.colorScheme.tertiaryContainer
+            DiagnosticVisualState.WAITING -> MaterialTheme.colorScheme.tertiaryContainer
             DiagnosticVisualState.ACTIVE -> MaterialTheme.colorScheme.secondaryContainer
             DiagnosticVisualState.COMPLETE -> MaterialTheme.colorScheme.primaryContainer
             DiagnosticVisualState.ATTENTION -> MaterialTheme.colorScheme.errorContainer
@@ -722,6 +814,7 @@ private fun DiagnosticOutput(label: String, value: String, onCopy: (String) -> U
     val indicatorContentColor = when (visualState) {
         DiagnosticVisualState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
         DiagnosticVisualState.RUNNING -> MaterialTheme.colorScheme.onTertiaryContainer
+        DiagnosticVisualState.WAITING -> MaterialTheme.colorScheme.onTertiaryContainer
         DiagnosticVisualState.ACTIVE -> MaterialTheme.colorScheme.onSecondaryContainer
         DiagnosticVisualState.COMPLETE -> MaterialTheme.colorScheme.onPrimaryContainer
         DiagnosticVisualState.ATTENTION -> MaterialTheme.colorScheme.onErrorContainer
@@ -747,11 +840,14 @@ private fun DiagnosticOutput(label: String, value: String, onCopy: (String) -> U
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
+            diagnosticVisualSummary(value, visualState)?.let { summary ->
+                Text(summary, style = MaterialTheme.typography.bodySmall)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = { expanded = !expanded }) {
                     Text(if (expanded) "Hide details" else "View details")
                 }
-                TextButton(onClick = { onCopy("$label: $value") }) {
+                TextButton(onClick = { onCopy("$label: $value") }, enabled = allowCopy) {
                     Text("Copy")
                 }
             }
@@ -770,6 +866,7 @@ private fun OperationStatusLine(label: String, value: String) {
     val color = when (state) {
         DiagnosticVisualState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
         DiagnosticVisualState.RUNNING -> MaterialTheme.colorScheme.tertiary
+        DiagnosticVisualState.WAITING -> MaterialTheme.colorScheme.tertiary
         DiagnosticVisualState.ACTIVE -> MaterialTheme.colorScheme.secondary
         DiagnosticVisualState.COMPLETE -> MaterialTheme.colorScheme.primary
         DiagnosticVisualState.ATTENTION -> MaterialTheme.colorScheme.error
@@ -783,6 +880,7 @@ private fun OperationStatusLine(label: String, value: String) {
 internal enum class DiagnosticVisualState(val label: String) {
     IDLE("Not run"),
     RUNNING("Running…"),
+    WAITING("Waiting"),
     ACTIVE("Active"),
     COMPLETE("Complete ✓"),
     ATTENTION("Needs attention"),
@@ -805,6 +903,13 @@ internal fun diagnosticVisualState(value: String): DiagnosticVisualState {
             "no foreground sync/publish result yet",
         )
     ) return DiagnosticVisualState.IDLE
+
+    if (!normalized.contains("failed") && (
+            normalized.contains("foreground sync/publish deferred") ||
+                normalized.contains("ring unavailable") && normalized.contains("waiting for") ||
+                normalized.contains("automatic sync skipped")
+        )
+    ) return DiagnosticVisualState.WAITING
 
     if (listOf(
             "failed",
@@ -841,6 +946,23 @@ internal fun diagnosticVisualState(value: String): DiagnosticVisualState {
         return DiagnosticVisualState.ACTIVE
     }
     return DiagnosticVisualState.COMPLETE
+}
+
+internal fun diagnosticVisualSummary(value: String, state: DiagnosticVisualState): String? = when (state) {
+    DiagnosticVisualState.WAITING -> when {
+        value.contains("ring unavailable", ignoreCase = true) ->
+            "Ring not reachable; no action is required unless it stays nearby without reconnecting."
+        else -> "The operation is safely deferred and will be retried by its normal trigger."
+    }
+    DiagnosticVisualState.ATTENTION -> {
+        val markers = listOf("failed", "could not", "rejected", "error", "did not finish")
+        value.split(';', '\n')
+            .map(String::trim)
+            .lastOrNull { clause -> markers.any { clause.contains(it, ignoreCase = true) } }
+            ?.take(180)
+            ?: "The operation did not complete. Open details for the exact failure and safe retry guidance."
+    }
+    else -> null
 }
 
 private fun MainActivity.requestAssociation() {
@@ -960,6 +1082,17 @@ private fun MainActivity.testRingConnection() {
     smokeTest = RingConnectionSmokeTest(
         context = this,
         onStatus = { status -> runOnUiThread { connectionStatus = status } },
+        onAuthenticationFinished = { passed, message ->
+            runOnUiThread {
+                if (passed) {
+                    RingAuthenticationStateStore(this).markVerified()
+                    setupStatus = "Ring authentication verified."
+                } else {
+                    setupStatus = "Ring authentication was not verified: $message"
+                }
+                refreshPrimeUiState()
+            }
+        },
     ).also { it.start(device) }
 }
 
@@ -1058,6 +1191,32 @@ private fun MainActivity.buildHealthConnectCandidatePreview() {
             }
         }.getOrElse { "Could not build candidate preview (${it.javaClass.simpleName})" }
         runOnUiThread { candidatePreviewStatus = result }
+    }.start()
+}
+
+private fun MainActivity.buildSleepDetailPreview() {
+    sleepDetailStatus = "Building the latest private overnight detail..."
+    sleepInventoryStatus = "Inspecting aggregate sleep-related tag structure..."
+    Thread {
+        val result = runCatching {
+            HistoryStore(this).use { store ->
+                val events = store.loadRawEvents()
+                val candidates = HealthConnectCandidatePreviewBuilder.build(events, ZoneId.systemDefault())
+                SleepNightDetailBuilder.build(events, candidates)
+            }
+        }
+        runOnUiThread {
+            result.onSuccess { built ->
+                SleepNightDetailStore(this).save(built.detail)
+                sleepDetailStatus = built.detail?.statusText()
+                    ?: "No completed local sleep window is available. Read only; nothing written."
+                sleepInventoryStatus = built.inventory.statusText()
+                refreshPrimeUiState()
+            }.onFailure {
+                sleepDetailStatus = "Could not build Sleep Detail v0 (${it.javaClass.simpleName}); nothing written."
+                sleepInventoryStatus = "Could not build the sleep inventory (${it.javaClass.simpleName})."
+            }
+        }
     }.start()
 }
 
@@ -1403,6 +1562,16 @@ private fun MainActivity.requestLastCompletedStepWindowAudit() {
 }
 
 private fun MainActivity.requestStepReadAction(action: StepReadAction, manualSteps: Int? = null) {
+    if (action == StepReadAction.START_TRIAL) {
+        if (ForegroundRunStateStore(this).uiSnapshot().outcome == ForegroundRunOutcome.RUNNING) {
+            stepTrialStatus = "Wait for the active ring sync to finish before starting a controlled trial."
+            return
+        }
+        StepTrialStore(this).active()?.let {
+            stepTrialStatus = "A controlled trial is already active. Mark, sync, and finalize it before starting another."
+            return
+        }
+    }
     pendingStepReadAction = action
     pendingManualStepCount = manualSteps
     if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
@@ -1512,8 +1681,8 @@ private fun MainActivity.startStepTrial() {
 }
 
 private fun MainActivity.markStepTrialWalkFinished(manualSteps: Int?) {
-    if (manualSteps == null || manualSteps <= 0) {
-        stepTrialStatus = "Enter the positive number of manually counted steps before marking the end."
+    if (manualSteps == null || manualSteps < 0) {
+        stepTrialStatus = "Enter the manually counted steps (0 is valid for the seated control)."
         return
     }
     val store = StepTrialStore(this)
@@ -1578,6 +1747,12 @@ private fun MainActivity.requestForegroundSyncPublish() {
     if (foregroundOperationActive) {
         foregroundSyncStatus = "A foreground sync/publish operation is already running."
         return
+    }
+    StepTrialStore(this).active()?.let {
+        if (StepTrialStore(this).markedEnd() == null) {
+            foregroundSyncStatus = "A controlled walk is active. Mark the walk finished before syncing."
+            return
+        }
     }
     if (bondedAssociatedDevice() == null) {
         foregroundSyncStatus = "Associate and bond the ring first; nothing changed."
@@ -1646,6 +1821,20 @@ private fun MainActivity.handlePrimeUiEvent(event: PrimeUiEvent) {
     when (event) {
         PrimeUiEvent.SyncNow -> requestForegroundSyncPublish()
         PrimeUiEvent.AssociateRing -> requestAssociation()
+        PrimeUiEvent.SelectCredentialFile -> {
+            if (!mayImportCredential(isStoredCredentialVerified())) {
+                setupStatus = "The verified credential is protected. Replacement is not enabled in this setup slice."
+            } else {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                runCatching {
+                    credentialDocumentLauncher.launch(arrayOf("text/plain", "application/octet-stream"))
+                }.onFailure {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    setupStatus = "Could not open the local document picker; nothing changed."
+                }
+            }
+        }
+        PrimeUiEvent.TestAuthentication -> testRingConnection()
         is PrimeUiEvent.SetBackgroundSync -> {
             if (event.enabled) enableBackgroundSync() else disableBackgroundSync()
         }
@@ -1680,9 +1869,20 @@ private fun MainActivity.refreshPrimeUiState(nowUnixMillis: Long = System.curren
     val associated = manager.myAssociations.isNotEmpty()
     val bonded = bondedAssociatedDevice() != null
     val sdkStatus = HealthConnectClient.getSdkStatus(this)
+    val keyStore = RingKeyStore(this)
+    val authenticationVerified = isStoredCredentialVerified()
+    val importedAt = keyStore.importedAtMillis()
+    val verifiedAt = RingAuthenticationStateStore(this).lastVerifiedMillis()
+    val lastSuccessAt = ForegroundRunStateStore(this).freshnessState().lastSuccessMillis
+    val firstSyncVerified = authenticationVerified && lastSuccessAt != null &&
+        (importedAt == null || lastSuccessAt >= importedAt) &&
+        (verifiedAt == null || lastSuccessAt >= verifiedAt)
     primeUiState = PrimeUiState(
         ringDisplayName = RingDisplayNameStore(this).load(),
-        keyPresent = RingKeyStore(this).hasKey(),
+        keyPresent = keyStore.hasKey(),
+        authenticationVerified = authenticationVerified,
+        firstSyncVerified = firstSyncVerified,
+        setupStatus = setupStatus,
         associated = associated,
         bonded = bonded,
         healthConnect = when {
@@ -1693,8 +1893,19 @@ private fun MainActivity.refreshPrimeUiState(nowUnixMillis: Long = System.curren
         run = ForegroundRunStateStore(this).uiSnapshot(),
         schedule = BackgroundScheduleStateStore(this).uiSnapshot(),
         metrics = LatestLocalMetricsStore(this).load(),
+        sleepDetail = SleepNightDetailStore(this).load(),
         nowUnixMillis = nowUnixMillis,
     )
+}
+
+private fun MainActivity.isStoredCredentialVerified(): Boolean {
+    val keyStore = RingKeyStore(this)
+    if (!keyStore.hasKey()) return false
+    val importedAt = keyStore.importedAtMillis()
+    val verifiedAt = RingAuthenticationStateStore(this).lastVerifiedMillis()
+    val legacyVerified = importedAt == null &&
+        ForegroundRunStateStore(this).freshnessState().lastSuccessMillis != null
+    return (verifiedAt != null && (importedAt == null || verifiedAt >= importedAt)) || legacyVerified
 }
 
 private fun MainActivity.beginForegroundSyncPublish() {
@@ -1925,6 +2136,36 @@ private fun MainActivity.copyDiagnostics(text: String) {
         putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
     }
     getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
+}
+
+private fun MainActivity.diagnosticReport(): String = listOf(
+    "Ring Health Bridge diagnostic report",
+    "Credential present: ${primeUiState.keyPresent}",
+    "Authentication verified: ${primeUiState.authenticationVerified}",
+    "Companion associated: ${primeUiState.associated}",
+    "Bluetooth bonded: ${primeUiState.bonded}",
+    "Health Connect state: ${primeUiState.healthConnect}",
+    "Run outcome: ${primeUiState.run?.outcome ?: "NOT_RUN"}",
+    "Privacy: no keys, device identifiers, timestamps, research values, health records, or free-text status messages.",
+).joinToString("\n\n")
+
+private fun MainActivity.shareDiagnostics(text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "Ring Health Bridge diagnostic report")
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    startActivity(Intent.createChooser(intent, "Share sanitized diagnostic report"))
+    diagnosticExportStatus = "Android share sheet opened; nothing is sent until you choose a destination."
+}
+
+private fun MainActivity.saveDiagnostics(text: String) {
+    pendingDiagnosticExportText = text
+    val timestamp = java.time.LocalDateTime.now().format(
+        java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"),
+    )
+    diagnosticDocumentLauncher.launch("ring-health-bridge-diagnostics-$timestamp.txt")
+    diagnosticExportStatus = "Choose a trusted local destination. A cloud-backed document provider may upload the report."
 }
 
 private fun MainActivity.bondedAssociatedDevice(): BluetoothDevice? {

@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import androidx.health.connect.client.HealthConnectClient
 import dev.local.ourahealthbridge.healthconnect.DailyHealthConnectPublisher
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunStateStore
+import dev.local.ourahealthbridge.healthconnect.StepTrialStore
 import dev.local.ourahealthbridge.security.RingKeyStore
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +41,7 @@ internal class ForegroundOpenSyncCoordinator(context: Context) {
 
     fun maybeStart(scope: CoroutineScope, now: Long = System.currentTimeMillis()) {
         RingPresenceObservation(context).ensureIfEnabled()
+        if (StepTrialStore(context).active() != null) return
         val runState = ForegroundRunStateStore(context).freshnessState()
         val lastDispatch = preferences.getLong(LAST_DISPATCH, 0L).takeIf { it > 0 }
         if (!ForegroundOpenSyncPolicy.shouldStart(

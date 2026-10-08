@@ -146,6 +146,7 @@ data class ForegroundRunReport(
     val skippedLowBattery: Boolean = false,
     val deferredUnavailable: Boolean = false,
     val detail: String? = null,
+    val phaseTiming: ForegroundPhaseTiming? = null,
 ) {
     fun statusText(): String {
         val outcome = when {
@@ -167,11 +168,25 @@ data class ForegroundRunReport(
         } else ""
         val suffix = detail?.let { "; $it" }.orEmpty()
         val battery = startingBatteryPercent?.let { ", starting ring battery $it%" }.orEmpty()
+        val timing = phaseTiming?.let {
+            "; phase timing BLE ${it.historyMillis.secondsDisplay()}, rebuild " +
+                "${it.rebuildMillis.secondsDisplay()} (${it.reconciliationEvents} reconciliation events), " +
+                "publish/verify ${it.publicationMillis.secondsDisplay()}"
+        }.orEmpty()
         return "Foreground sync/publish $outcome - sync sessions $syncSessions, connection retries " +
             "$connectionRetries$battery, received " +
-            "$receivedEvents, added $addedEvents$stored; $publication$deferred$suffix."
+            "$receivedEvents, added $addedEvents$stored; $publication$deferred$timing$suffix."
     }
+
+    private fun Long.secondsDisplay(): String = "%.1fs".format(this / 1_000.0)
 }
+
+data class ForegroundPhaseTiming(
+    val historyMillis: Long,
+    val rebuildMillis: Long,
+    val publicationMillis: Long,
+    val reconciliationEvents: Int,
+)
 
 class ForegroundRunStateStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)

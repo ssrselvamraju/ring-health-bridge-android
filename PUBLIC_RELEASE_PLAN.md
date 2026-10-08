@@ -1,5 +1,58 @@
 # Public release plan and audit record
 
+## Current update: 2026-10-07
+
+This section supersedes the original snapshot recommendation and publication
+checklist below, which are retained as historical audit evidence. The public
+repository already exists. This update is a local branch based on public main
+`5fd5ef894906dcb3f78d9dd519ce6dc0088e7915`, not a new initial repository or an
+import of private Git history. No push or binary publication is part of this run.
+
+Selected changes include guided setup with user-selected credential-file import,
+authentication verification, clearer waiting states, sync/trial mutual exclusion,
+phase timing, synthetic tests, and an explicitly experimental local sleep-detail
+card. Desktop-assisted provisioning remains necessary; this is not a complete
+phone-only provisioning workflow. Verified credentials cannot be silently replaced.
+The importer limits input size, accepts only a strict ASCII hexadecimal key, wraps
+storage with Android Keystore, and clears owned temporary byte buffers. Clearing
+buffers cannot guarantee removal of provider/runtime copies.
+
+Public adaptations keep existing branding, disclosures, licenses, reduced write
+permissions, disabled backups, release ADB-import disablement, and merged public
+dependency/CI upgrades. Share/save reports now contain only fixed status enums and
+booleans, not free-text research output, identifiers, timestamps or health values.
+New sleep research output cannot be copied from its card. Older diagnostic exports
+may still contain sensitive research information and must not be posted publicly.
+User-selected share/save destinations can upload information outside the app.
+
+Bounded reconciliation is enabled only in debug builds until physical-device parity
+and backlog evidence is available. Release publication retains full-history loading.
+New step-field inference, personal observations, health captures, machine paths,
+assistant handoffs, signing material and generated binaries are excluded.
+
+New verification on the stable candidate (not inherited from the earlier audit):
+
+- `test lint assembleDebug assembleRelease`: successful; 101 debug JVM tests in
+  27 suites, zero failures/errors/skips; lint has 42 warnings and zero errors.
+- Debug APK and unsigned release APK assembled in external ignored build output;
+  neither is committed or offered as an installable release.
+- A separate `testReleaseUnitTest` attempt was unavailable: this project exposes
+  only the debug JVM test component. Release assembly passed, but no separate
+  release-variant JVM test result is claimed.
+- Merged release manifest retains no INTERNET permission, `allowBackup=false`,
+  extraction rules, only heart-rate/HRV/sleep write permissions, and no newly
+  exported credential-import component. Existing library-exported components remain.
+- Staged filename, identity/path, common-token/private-key and MAC-address regex
+  checks found no prohibited material. Long hexadecimal fixtures are synthetic or
+  already-public upstream test vectors. Dedicated secret-scanner tools were absent;
+  these checks are not a guarantee against every possible secret.
+
+No physical-device tests, ring reset, provisioning, Health Connect readback or
+hardware parity checks were performed in this unattended run. Fresh release setup,
+verified-key replacement/reconfiguration design, bounded reconciliation parity,
+release-specific SBOM/license review and a signing plan remain APK-release gates.
+This is a source candidate for maintainer review, not a general-user APK approval.
+
 Audit date: 2026-10-01
 
 Candidate basis: private source commit `c272247` with the private working-tree

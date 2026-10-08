@@ -47,7 +47,17 @@ number, or diagnostic export in an issue.
 
 All raw history, keys, preferences, and diagnostics remain in app-private storage.
 Android backup and device-to-device transfer rules exclude the complete app data
-tree. Release builds cannot use the developer ADB key-import bridge.
+tree. Release builds cannot use the developer ADB key-import bridge. Guided setup
+can import a user-selected credential file into Android Keystore-protected storage.
+Android-only ring provisioning is not validated; the desktop-assisted prerequisite
+and factory-reset warning still apply. A verified working credential cannot be
+replaced through the first-run importer.
+
+Advanced diagnostics can explicitly copy, share, or save a minimal setup-status
+report. That report excludes keys, identifiers, health/research values, timestamps,
+and arbitrary status text. An external share target or cloud-backed document
+provider can upload data even though this app has no Internet permission. Other
+legacy research clipboard actions remain sensitive: never post their output publicly.
 
 The app requests Bluetooth/companion-device and foreground-service permissions.
 For publication it requests Health Connect read/write access only for heart rate,
@@ -77,7 +87,14 @@ or `adb install`. Build output is redirected to
 The public source does not contain a ring key. The optional Windows provisioning
 helpers require a separate checkout of the pinned `open_oura` revision described
 in [`desktop/UPSTREAM.md`](desktop/UPSTREAM.md). The ADB staging path exists only in
-debug builds; release builds always return `DISABLED`.
+debug builds; release builds always return `DISABLED`. For release-mode setup,
+open Settings → Guided setup and select a private ASCII file containing exactly
+32 hexadecimal credential characters (whitespace allowed; maximum file size
+128 bytes). Do not select a file from an untrusted source or share it with anyone.
+After import, associate/bond the ring, verify ring authentication, then grant the
+three publication types and perform a verified first sync. Import and pairing
+alone do not mean setup succeeded. Remove unnecessary copies of the credential
+file from local storage and any document-provider backups.
 
 ## Limitations and battery impact
 
@@ -90,6 +107,15 @@ debug builds; release builds always return `DISABLED`.
   confirmation, preserves a rollback target, leaves subscription state unchanged,
   and never publishes steps. It remains experimental.
 - No signed or supported release APK is distributed from this candidate.
+- Guided setup and bounded reconciliation have automated coverage but still need
+  fresh release-mode physical-ring verification. In debug builds, bounded reconciliation retains
+  a recent window and expands for newly imported older backlog; full-history
+  rebuild actions remain explicitly user-triggered and may be slow. Release builds
+  retain full-history publication reconstruction until bounded/full-history parity
+  has been physically verified.
+- The local sleep-detail card is experimental. Finger-sensor temperature and
+  relative movement are not validated clinical measures; stage/SpO2 packet counts
+  are structural research only, and none of these are published to Health Connect.
 
 ## Development
 
