@@ -48,6 +48,7 @@ class RingConnectionSmokeTest(
     private val onHistoryFinished: ((HistorySyncResult) -> Unit)? = null,
     private val onHistoryBattery: ((Int) -> Unit)? = null,
     private val onFeatureStatusFinished: ((RingFeatureStatusResult) -> Unit)? = null,
+    private val onAuthenticationFinished: ((Boolean, String) -> Unit)? = null,
 ) : BluetoothGattCallback() {
     private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -649,6 +650,7 @@ class RingConnectionSmokeTest(
         onStatus(message)
         val historyCallback = onHistoryFinished.takeIf { operation == Operation.HISTORY_SYNC }
         val featureCallback = onFeatureStatusFinished.takeIf { operation == Operation.FEATURE_STATUS }
+        val authenticationCallback = onAuthenticationFinished.takeIf { operation == Operation.BATTERY_TEST }
         val historyResult = historyCallback?.let {
             HistorySyncResult(
                 passed = true,
@@ -668,6 +670,7 @@ class RingConnectionSmokeTest(
         if (featureCallback != null) {
             featureCallback(RingFeatureStatusResult(true, receivedFeatureStatus, message))
         }
+        if (authenticationCallback != null) authenticationCallback(true, message)
     }
 
     private fun fail(
@@ -679,6 +682,7 @@ class RingConnectionSmokeTest(
         onStatus(message)
         val historyCallback = onHistoryFinished.takeIf { operation == Operation.HISTORY_SYNC }
         val featureCallback = onFeatureStatusFinished.takeIf { operation == Operation.FEATURE_STATUS }
+        val authenticationCallback = onAuthenticationFinished.takeIf { operation == Operation.BATTERY_TEST }
         val historyResult = historyCallback?.let {
             HistorySyncResult(
                 passed = false,
@@ -698,6 +702,7 @@ class RingConnectionSmokeTest(
         if (featureCallback != null) {
             featureCallback(RingFeatureStatusResult(false, null, message))
         }
+        if (authenticationCallback != null) authenticationCallback(false, message)
     }
 
     private enum class Stage {

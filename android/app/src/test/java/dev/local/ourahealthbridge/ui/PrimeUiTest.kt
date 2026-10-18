@@ -1,6 +1,8 @@
 package dev.local.ourahealthbridge.ui
 
 import dev.local.ourahealthbridge.analysis.LatestLocalMetrics
+import dev.local.ourahealthbridge.healthconnect.ForegroundRunOutcome
+import dev.local.ourahealthbridge.healthconnect.ForegroundRunUiSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -10,7 +12,68 @@ class PrimeUiTest {
     fun backNavigationReturnsThroughSettingsBeforeLeavingHome() {
         assertEquals(PrimeDestination.SETTINGS, backDestination(PrimeDestination.ADVANCED_LEGACY))
         assertEquals(PrimeDestination.HOME, backDestination(PrimeDestination.SETTINGS))
+        assertEquals(PrimeDestination.HOME, backDestination(PrimeDestination.SETUP))
         assertEquals(null, backDestination(PrimeDestination.HOME))
+    }
+
+    @Test
+    fun guidedSetupDerivesProgressFromVerifiedReality() {
+        assertEquals(GuidedSetupStage.CREDENTIAL, guidedSetupStage(PrimeUiState()))
+        assertEquals(
+            GuidedSetupStage.ASSOCIATION,
+            guidedSetupStage(PrimeUiState(keyPresent = true)),
+        )
+        assertEquals(
+            GuidedSetupStage.AUTHENTICATION,
+            guidedSetupStage(PrimeUiState(keyPresent = true, associated = true, bonded = true)),
+        )
+        assertEquals(
+            GuidedSetupStage.HEALTH_CONNECT,
+            guidedSetupStage(
+                PrimeUiState(keyPresent = true, associated = true, bonded = true, authenticationVerified = true),
+            ),
+        )
+        assertEquals(
+            GuidedSetupStage.FIRST_SYNC,
+            guidedSetupStage(
+                PrimeUiState(
+                    keyPresent = true,
+                    associated = true,
+                    bonded = true,
+                    authenticationVerified = true,
+                    healthConnect = HealthConnectState.READY,
+                ),
+            ),
+        )
+        assertEquals(
+            GuidedSetupStage.COMPLETE,
+            guidedSetupStage(
+                PrimeUiState(
+                    keyPresent = true,
+                    associated = true,
+                    bonded = true,
+                    authenticationVerified = true,
+                    healthConnect = HealthConnectState.READY,
+                    firstSyncVerified = true,
+                    run = ForegroundRunUiSnapshot(
+                        hasTypedSummary = true,
+                        outcome = ForegroundRunOutcome.PASSED,
+                        source = "test",
+                        currentStage = null,
+                        lastAttemptMillis = 1L,
+                        lastFinishedMillis = 1L,
+                        lastSuccessMillis = 1L,
+                        affectedDates = 1,
+                        heartRateSamples = 1,
+                        hrvRecords = 1,
+                        sleepRecords = 1,
+                        detail = "passed",
+                        ringBatteryPercent = null,
+                        ringBatteryMeasuredMillis = null,
+                    ),
+                ),
+            ),
+        )
     }
 
     private val now = 10L * 60L * 60L * 1_000L

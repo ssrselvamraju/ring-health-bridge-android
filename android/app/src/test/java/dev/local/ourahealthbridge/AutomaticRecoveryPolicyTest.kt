@@ -3,6 +3,7 @@ package dev.local.ourahealthbridge
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunFreshnessState
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunOutcome
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunReport
+import dev.local.ourahealthbridge.healthconnect.ForegroundPhaseTiming
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -65,6 +66,13 @@ class AutomaticRecoveryPolicyTest {
                     now - AutomaticSyncDispatchPolicy.RECENT_SUCCESS_MILLIS,
                 ),
             ),
+        )
+        assertTrue(
+            AutomaticSyncDispatchPolicy.coalescingReason(
+                now,
+                ForegroundRunFreshnessState(null, null, null),
+                controlledTrialActive = true,
+            )!!.contains("controlled step trial"),
         )
     }
 
@@ -178,5 +186,28 @@ class AutomaticRecoveryPolicyTest {
         )
 
         assertTrue(text.contains("sleep ID/count"))
+    }
+
+    @Test
+    fun runReportIncludesPrivacySafePhaseTiming() {
+        val text = ForegroundRunReport(
+            passed = true,
+            syncSessions = 1,
+            receivedEvents = 10,
+            addedEvents = 10,
+            storedEvents = 1_000,
+            affectedDates = 0,
+            heartRateRecords = 0,
+            heartRateSamples = 0,
+            hrvRecords = 0,
+            sleepRecords = 0,
+            obsoleteRecordsDeleted = 0,
+            deferredRecentSleepRecords = 0,
+            phaseTiming = ForegroundPhaseTiming(1_500, 2_500, 500, 321),
+        ).statusText()
+
+        assertTrue(text.contains("BLE 1.5s"))
+        assertTrue(text.contains("rebuild 2.5s (321 reconciliation events)"))
+        assertTrue(text.contains("publish/verify 0.5s"))
     }
 }

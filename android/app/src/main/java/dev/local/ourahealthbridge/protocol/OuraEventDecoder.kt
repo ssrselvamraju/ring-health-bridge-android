@@ -16,6 +16,8 @@ sealed interface DecodedRingEvent {
     data class SleepAccelerometer(val mad: List<Double>) : DecodedRingEvent
     data class MotionPeriod(val periodType: Int, val levels: List<Int>) : DecodedRingEvent
     data class QualityMarkedIbi(val ibiMillis: List<Int>, val quality: List<Int>) : DecodedRingEvent
+    data class SleepPhases(val header: Int, val phases: List<Int>) : DecodedRingEvent
+    data class Spo2(val percentages: List<Int>) : DecodedRingEvent
 }
 
 /** Selected byte-exact decoders ported from the pinned open_oura implementation. */
@@ -32,6 +34,8 @@ object OuraEventDecoder {
         0x72 -> decodeSleepAccelerometer(event.body)
         0x76 -> decodeBedtime(event.body)
         0x80 -> decodeQualityMarkedIbi(event.body)
+        0x4b, 0x4e, 0x5a -> decodeSleepPhases(event.body)
+        0x6f -> decodeSpo2(event.body)
         else -> null
     }
 
@@ -146,6 +150,27 @@ object OuraEventDecoder {
             quality += (second shr 3) and 0x03
         }
         return DecodedRingEvent.QualityMarkedIbi(ibi, quality)
+    }
+
+    private fun decodeSleepPhases(body: ByteArray): DecodedRingEvent.SleepPhases? {
+        if (body.size < 2) return null
+        val phases = body.drop(1).flatMap { byte ->
+            val value = byte.toUByte().toInt()
+            listOf(6, 4, 2, 0).map { shift -> (value shr shift) and 0x03 }
+        }
+        return DecodedRingEvent.SleepPhases(body[0].toUByte().toInt(), phases)
+    }
+
+    private fun decodeSpo2(body: ByteArray): DecodedRingEvent.Spo2? {
+        if (body.size < 2) return null
+        val sampleBytes = if (body.last().toUByte().toInt() == 0xff) {
+            body.drop(1).dropLast(1)
+        } else {
+            body.drop(1)
+        }
+        val values = sampleBytes.map { it.toUByte().toInt() }
+        if (values.isEmpty() || values.any { it !in 0..100 }) return null
+        return DecodedRingEvent.Spo2(values)
     }
 
     private const val MIN_PLAUSIBLE_UNIX_SECONDS = 1_577_836_800L // 2020-01-01 UTC

@@ -10,6 +10,7 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunOutcome
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunStateStore
+import dev.local.ourahealthbridge.healthconnect.StepTrialStore
 
 /** Registers Android's system-owned BLE observation for the already-associated ring. */
 internal class RingPresenceObservation(context: Context) {
@@ -106,6 +107,7 @@ internal class PresenceSyncTrigger(context: Context) {
             runState.freshnessState(),
             snapshot.outcome,
             snapshot.source,
+            StepTrialStore(context).active() != null,
         )
         if (reason != null) {
             scheduleState.markCoalesced(now, "presence", reason)
@@ -134,8 +136,9 @@ internal object PresenceSyncDispatchPolicy {
         freshness: dev.local.ourahealthbridge.healthconnect.ForegroundRunFreshnessState,
         outcome: ForegroundRunOutcome,
         source: String?,
+        controlledTrialActive: Boolean = false,
     ): String? {
-        AutomaticSyncDispatchPolicy.coalescingReason(now, freshness)?.let { return it }
+        AutomaticSyncDispatchPolicy.coalescingReason(now, freshness, controlledTrialActive)?.let { return it }
         val finished = freshness.lastFinishedMillis ?: return null
         val age = now - finished
         if (source == ForegroundSyncService.SOURCE_PRESENCE &&

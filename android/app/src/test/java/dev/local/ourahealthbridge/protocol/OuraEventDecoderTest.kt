@@ -87,6 +87,20 @@ class OuraEventDecoderTest {
         }
     }
 
+    @Test
+    fun decodesStructuralSleepPhasePacket() {
+        val decoded = decode(0x4b, "011b") as DecodedRingEvent.SleepPhases
+        assertEquals(1, decoded.header)
+        assertEquals(listOf(0, 1, 2, 3), decoded.phases)
+    }
+
+    @Test
+    fun decodesFinishedSpo2PacketAndSentinel() {
+        val decoded = decode(0x6f, "006162ff") as DecodedRingEvent.Spo2
+        assertEquals(listOf(97, 98), decoded.percentages)
+        assertNull(decode(0x6f, "0065ff"))
+    }
+
     private fun decode(tag: Int, bodyHex: String): DecodedRingEvent? =
         OuraEventDecoder.decode(RawRingEvent(tag, 1u, bodyHex.hex()))
 

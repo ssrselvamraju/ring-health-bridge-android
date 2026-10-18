@@ -18,6 +18,8 @@ import androidx.health.connect.client.HealthConnectClient
 import dev.local.ourahealthbridge.analysis.HealthConnectCandidatePreviewBuilder
 import dev.local.ourahealthbridge.analysis.LatestLocalMetricsSelector
 import dev.local.ourahealthbridge.analysis.LatestLocalMetricsStore
+import dev.local.ourahealthbridge.analysis.SleepNightDetailBuilder
+import dev.local.ourahealthbridge.analysis.SleepNightDetailStore
 import dev.local.ourahealthbridge.bluetooth.HistorySyncResult
 import dev.local.ourahealthbridge.bluetooth.RingConnectionSmokeTest
 import dev.local.ourahealthbridge.healthconnect.DailyHealthConnectPublisher
@@ -25,8 +27,10 @@ import dev.local.ourahealthbridge.healthconnect.DailyPublicationSelector
 import dev.local.ourahealthbridge.healthconnect.DailyPublicationStateStore
 import dev.local.ourahealthbridge.healthconnect.ForegroundPublicationPlan
 import dev.local.ourahealthbridge.healthconnect.ForegroundPublicationPlanner
+import dev.local.ourahealthbridge.healthconnect.ForegroundPhaseTiming
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunReport
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunStateStore
+import dev.local.ourahealthbridge.healthconnect.StepTrialStore
 import dev.local.ourahealthbridge.storage.HistoryStore
 import java.time.ZoneId
 import java.util.Locale
@@ -56,6 +60,20 @@ class ForegroundSyncService : Service() {
         if (active) return START_NOT_STICKY
         triggerSource = intent?.getStringExtra(EXTRA_SOURCE) ?: SOURCE_MANUAL
         startForeground(NOTIFICATION_ID, notification("Preparing ring sync"))
+        val trialActive = StepTrialStore(this).active() != null
+        val admissionReason = when {
+            trialActive && triggerSource != SOURCE_MANUAL -> "a controlled step trial is active"
+            isAutomaticSource(triggerSource) -> AutomaticSyncDispatchPolicy.coalescingReason(
+                System.currentTimeMillis(),
+                runState.freshnessState(),
+            )
+            else -> null
+        }
+        if (admissionReason != null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         active = true
         runState.markAttempt(
             System.currentTimeMillis(),
@@ -80,7 +98,10 @@ class ForegroundSyncService : Service() {
             fail("associated and bonded ring unavailable; nothing written")
             return
         }
-        run = ServiceRun(device, ZoneId.systemDefault())
+        val initialRawEventId = withContext(Dispatchers.IO) {
+            HistoryStore(this@ForegroundSyncService).use(HistoryStore::latestRawEventId)
+        }
+        run = ServiceRun(device, ZoneId.systemDefault(), initialRawEventId = initialRawEventId)
         startHistorySession()
     }
 
@@ -188,17 +209,31 @@ class ForegroundSyncService : Service() {
 
     private suspend fun buildAndPublish() {
         val current = run ?: return
-        val after = runCatching {
+        current.historyMillis = System.currentTimeMillis() - current.startedUnixMillis
+        val rebuildStarted = System.currentTimeMillis()
+        val rebuilt = runCatching {
             withContext(Dispatchers.Default) {
                 HistoryStore(this@ForegroundSyncService).use { store ->
                     current.storedEvents = store.stats().eventCount
-                    HealthConnectCandidatePreviewBuilder.build(store.loadRawEvents(), current.zoneId)
+                    // Bounded publication requires physical parity evidence before release use.
+                    val events = if (BuildConfig.DEBUG) store.loadRawEventsForReconciliation(
+                        tags = RECONCILIATION_TAGS,
+                        initialRawEventId = current.initialRawEventId,
+                        recentLookbackDeciseconds = RECENT_LOOKBACK_DECISECONDS,
+                        newEventMarginDeciseconds = NEW_EVENT_MARGIN_DECISECONDS,
+                    ) else store.loadRawEvents()
+                    current.reconciliationEvents = events.size
+                    val candidates = HealthConnectCandidatePreviewBuilder.build(events, current.zoneId)
+                    candidates to SleepNightDetailBuilder.build(events, candidates)
                 }
             }
         }.getOrElse {
             fail("after-sync candidate build failed (${it.javaClass.simpleName})")
             return
         }
+        current.rebuildMillis = System.currentTimeMillis() - rebuildStarted
+        val after = rebuilt.first
+        SleepNightDetailStore(this).save(rebuilt.second.detail)
         LatestLocalMetricsStore(this).save(LatestLocalMetricsSelector.select(after))
         val now = System.currentTimeMillis()
         val publicationState = DailyPublicationStateStore(this)
@@ -212,6 +247,7 @@ class ForegroundSyncService : Service() {
             return
         }
         progress("Publishing and exactly verifying ${plan.affectedDateCount} affected date(s)...")
+        val publicationStarted = System.currentTimeMillis()
         val publisher = DailyHealthConnectPublisher(
             HealthConnectClient.getOrCreate(this), packageName,
         )
@@ -246,9 +282,11 @@ class ForegroundSyncService : Service() {
             }
         }.exceptionOrNull()
         if (failure != null) {
+            current.publicationMillis = System.currentTimeMillis() - publicationStarted
             fail("publication/verification failed (${publicationFailureCategory(failure)}); retry is safe")
             return
         }
+        current.publicationMillis = System.currentTimeMillis() - publicationStarted
         finish(current.report(true, plan, "exact read-back verified"))
     }
 
@@ -338,6 +376,8 @@ class ForegroundSyncService : Service() {
         const val SOURCE_PRESENCE = "presence"
         const val SOURCE_RECOVERY = "recovery"
 
+        fun isAutomaticSource(source: String): Boolean = source != SOURCE_MANUAL && source != SOURCE_TEST
+
         private const val CHANNEL_ID = "ring-sync"
         private const val NOTIFICATION_ID = 100
         private const val BATCHES_PER_CONNECTION = 80
@@ -347,6 +387,10 @@ class ForegroundSyncService : Service() {
         private const val CONNECTION_RETRY_DELAY_MS = 8_000L
         private const val RECONNECT_DELAY_MS = 3_000L
         private const val EXTRA_SOURCE = "source"
+        private const val RECENT_LOOKBACK_DECISECONDS = 4L * 24L * 60L * 60L * 10L
+        private const val NEW_EVENT_MARGIN_DECISECONDS = 24L * 60L * 60L * 10L
+        private val RECONCILIATION_TAGS = setOf(0x42, 0x5d, 0x60, 0x76, 0x80) +
+            SleepNightDetailBuilder.INVENTORY_TAGS
     }
 }
 
@@ -381,6 +425,8 @@ internal object AutomaticConnectionFailurePolicy {
 private data class ServiceRun(
     val device: BluetoothDevice,
     val zoneId: ZoneId,
+    val initialRawEventId: Long,
+    val startedUnixMillis: Long = System.currentTimeMillis(),
     var syncSessions: Int = 0,
     var connectionRetries: Int = 0,
     var consecutiveConnectionFailures: Int = 0,
@@ -395,6 +441,10 @@ private data class ServiceRun(
     var obsoleteRecordsDeleted: Int = 0,
     var deferredRecentSleepRecords: Int = 0,
     var startingBatteryPercent: Int? = null,
+    var reconciliationEvents: Int = 0,
+    var historyMillis: Long = 0L,
+    var rebuildMillis: Long = 0L,
+    var publicationMillis: Long = 0L,
 ) {
     fun report(
         passed: Boolean,
@@ -413,6 +463,12 @@ private data class ServiceRun(
         skippedLowBattery = skippedLowBattery,
         deferredUnavailable = deferredUnavailable,
         detail = detail,
+        phaseTiming = ForegroundPhaseTiming(
+            historyMillis = historyMillis,
+            rebuildMillis = rebuildMillis,
+            publicationMillis = publicationMillis,
+            reconciliationEvents = reconciliationEvents,
+        ),
     )
 }
 

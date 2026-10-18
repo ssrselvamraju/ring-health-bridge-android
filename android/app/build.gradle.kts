@@ -15,8 +15,8 @@ android {
         applicationId = "dev.local.ourahealthbridge"
         minSdk = 34
         targetSdk = 37
-        versionCode = 16
-        versionName = "0.3.12-dev"
+        versionCode = 21
+        versionName = "0.3.17-dev"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

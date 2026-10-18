@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunFreshnessState
 import dev.local.ourahealthbridge.healthconnect.ForegroundRunStateStore
+import dev.local.ourahealthbridge.healthconnect.StepTrialStore
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
@@ -29,6 +30,7 @@ class ScheduledSyncWorker(
             val reason = AutomaticSyncDispatchPolicy.coalescingReason(
                 now,
                 ForegroundRunStateStore(applicationContext).freshnessState(),
+                StepTrialStore(applicationContext).active() != null,
             )
             if (reason != null) {
                 state.markCoalesced(now, kind, reason)
@@ -286,7 +288,12 @@ internal object AutomaticSyncDispatchPolicy {
     const val RECENT_SUCCESS_MILLIS = 30L * 60L * 1_000L
     const val ACTIVE_ATTEMPT_MAX_AGE_MILLIS = 45L * 60L * 1_000L
 
-    fun coalescingReason(now: Long, state: ForegroundRunFreshnessState): String? {
+    fun coalescingReason(
+        now: Long,
+        state: ForegroundRunFreshnessState,
+        controlledTrialActive: Boolean = false,
+    ): String? {
+        if (controlledTrialActive) return "a controlled step trial is active"
         val attempt = state.lastAttemptMillis
         val unfinished = attempt != null &&
             (state.lastFinishedMillis == null || attempt > state.lastFinishedMillis) &&
